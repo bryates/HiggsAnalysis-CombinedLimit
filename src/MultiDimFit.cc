@@ -4,6 +4,8 @@
 
 #include "TMath.h"
 #include "TFile.h"
+#include "TH1.h"
+#include "TF1.h"
 #include "RooArgSet.h"
 #include "RooArgList.h"
 #include "RooRandom.h"
@@ -639,6 +641,13 @@ void MultiDimFit::doGrid(RooWorkspace *w, RooAbsReal &nll)
     if (n == 1) {
         if (verbose > 1) std::cout << "\nStarting n==1. The nll0 from initial fit: " << nll0 << std::endl;
         unsigned int points = pointsPerPoi.size() == 0 ? points_ : pointsPerPoi[0];
+        float *vec_of_pois = new float[points]; // Keep track of previous POI values
+        float *vec_of_nll_min = new float[points]; // Keep trakc of previous NLL values
+        std::vector<bool> exhausted(points-1); // Keep track of which points were already retried
+        int retries = 1; // Just retry once with `pointsRandProf_` random points
+        float localFitChi2 = 0;
+        int tmpPointsRandProf_ = pointsRandProf_;
+        pointsRandProf_ = 1;
 
         // Set seed for random points
         srand(1);
@@ -773,10 +782,48 @@ void MultiDimFit::doGrid(RooWorkspace *w, RooAbsReal &nll)
                 nll_at_alt_start_pts.push_back(nll.getVal());
 
             }
+ 
 
             // Rerun the fit for the point with the min nll
             int min_nll_idx;
             min_nll_idx = std::min_element(nll_at_alt_start_pts.begin(),nll_at_alt_start_pts.end()) - nll_at_alt_start_pts.begin();
+            vec_of_pois[i] = x;
+            vec_of_nll_min[i] = nll_at_alt_start_pts.at(min_nll_idx);
+            unsigned int n = 10;
+            if(i>n && retries>0 && !exhausted[i]) {
+              TH1F fit = TH1F("fit", "fit", n, vec_of_pois[i-n]-1, vec_of_pois[i]+1);
+              for(int j = n; j > 0; j--) { // Store previous n points for fitting
+                fit.SetBinContent(n-j, vec_of_pois[i-j], vec_of_nll_min[i-j]);
+              }
+              fit.SetBinContent(n, vec_of_pois[i], vec_of_nll_min[i]); // Add current point to hist
+              fit.Fit("pol2", "Q"); // Fit last n points with a quadratic
+              if(fit.GetFunction("pol2") == nullptr) {
+                std::cout << "Bad polynomial fit" << std::endl;
+                pointsRandProf_ = tmpPointsRandProf_;
+                exhausted[i] = true;
+                retries--;
+                i=i-1; // Redo the previous point
+                continue; // No need to save this point
+              }
+              else if(localFitChi2 / fit.GetFunction("pol2")->GetChisquare() < 1e-2 || fit.GetFunction("pol2")->GetChisquare() > 1e-2) {
+                if(verbose > 1) std::cout << "Possible disconinuity found at Point=" << i << "! Stepping back" << std::endl;
+                if(verbose > 1) std::cout << "NLL=" << nll_at_alt_start_pts.at(min_nll_idx) << std::endl;
+                if(verbose > 1) std::cout << "predited " << fit.GetFunction("pol2")->Eval(vec_of_pois[i])-vec_of_nll_min[i] << "\t" << (fit.GetFunction("pol2")->Eval(vec_of_pois[i])-vec_of_nll_min[i])/vec_of_nll_min[i] << std::endl;
+                if(verbose > 1) std::cout << "Previous NLL=" << vec_of_nll_min[i-1] << std::endl;
+                std::vector<std::pair<double,float>> interp;
+                pointsRandProf_ = tmpPointsRandProf_;
+                std::cout << "Retrying with " << pointsRandProf_ << " random points" << std::endl;
+                exhausted[i] = true;
+                retries--;
+                i=i-1; // Redo the previous point
+                localFitChi2 = fit.GetFunction("pol2")->GetChisquare();
+                continue; // No need to save this point
+              }
+            }
+            else {
+              pointsRandProf_ = 1;
+              retries = 1;
+            }
             if (verbose > 1) std::cout << "\tMin nll at idx: " << min_nll_idx << " " << nll_at_alt_start_pts.at(min_nll_idx) << std::endl;
             if (verbose > 1) std::cout << "\tResetting for rerunning at the point that gives best nll:" << std::endl;
             *params = snap;
