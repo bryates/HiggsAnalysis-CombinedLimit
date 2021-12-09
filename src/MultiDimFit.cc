@@ -802,7 +802,7 @@ void MultiDimFit::doGrid(RooWorkspace *w, RooAbsReal &nll)
                 pointsRandProf_ = tmpPointsRandProf_;
                 exhausted[i] = true;
                 retries--;
-                i=i-1; // Redo the previous point
+                i=i-2; // Redo the previous point (yes, that's a 2 b/c we need i-1 but the loop has i++)
                 continue; // No need to save this point
               }
               else if(localFitChi2 / fit.GetFunction("pol2")->GetChisquare() < 1e-2 || fit.GetFunction("pol2")->GetChisquare() > 1e-2) {
@@ -815,7 +815,7 @@ void MultiDimFit::doGrid(RooWorkspace *w, RooAbsReal &nll)
                 std::cout << "Retrying with " << pointsRandProf_ << " random points" << std::endl;
                 exhausted[i] = true;
                 retries--;
-                i=i-1; // Redo the previous point
+                i=i-2; // Redo the previous point (yes, that's a 2 b/c we need i-1 but the loop has i++)
                 localFitChi2 = fit.GetFunction("pol2")->GetChisquare();
                 continue; // No need to save this point
               }
