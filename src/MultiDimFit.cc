@@ -2,6 +2,9 @@
 #include <stdexcept>
 #include <cmath>
 
+#include <TProfile.h>
+#include <TString.h>
+#include <TTree.h>
 #include "TMath.h"
 #include "TFile.h"
 #include "RooArgSet.h"
@@ -60,6 +63,7 @@ float MultiDimFit::centeredRange_ = -1.0;
 bool        MultiDimFit::robustHesse_ = false;
 std::string MultiDimFit::robustHesseLoad_ = "";
 std::string MultiDimFit::robustHesseSave_ = "";
+std::string inputFile_ = "";
 
 
 std::string MultiDimFit::saveSpecifiedFuncs_;
@@ -110,6 +114,7 @@ MultiDimFit::MultiDimFit() :
     ("robustHesse",  boost::program_options::value<bool>(&robustHesse_)->default_value(robustHesse_),  "Use a more robust calculation of the hessian/covariance matrix")
     ("robustHesseLoad",  boost::program_options::value<std::string>(&robustHesseLoad_)->default_value(robustHesseLoad_),  "Load the pre-calculated Hessian")
     ("robustHesseSave",  boost::program_options::value<std::string>(&robustHesseSave_)->default_value(robustHesseSave_),  "Save the calculated Hessian")
+    ("inputFile",  boost::program_options::value<std::string>(&inputFile_)->default_value(inputFile_),  "Read input mc or other intermediate results from this file")
       ;
 }
 
@@ -130,6 +135,8 @@ void MultiDimFit::applyOptions(const boost::program_options::variables_map &vm)
         algo_ = FixedPoint;
     } else if (algo == "random") {
         algo_ = RandomPoints;
+    } else if (algo == "invsamp") {
+        algo_ = InverseSamplePoints;
     } else if (algo == "contour2d") {
         algo_ = Contour2D;
     } else if (algo == "stitch2d") {
@@ -293,6 +300,7 @@ bool MultiDimFit::runSpecific(RooWorkspace *w, RooStats::ModelConfig *mc_s, RooS
         case Cross: doBox(*nll, cl, "box", true); break;
         case Grid: doGrid(w,*nll); break;
         case RandomPoints: doRandomPoints(w,*nll); break;
+        case InverseSamplePoints: doInverseSamplePoints(w,*nll,mc_s); break;
         case FixedPoint: doFixedPoint(w,*nll); break;
         case Contour2D: doContour2D(w,*nll); break;
         case Stitch2D: doStitch2D(w,*nll); break;
@@ -953,6 +961,81 @@ void MultiDimFit::doGrid(RooWorkspace *w, RooAbsReal &nll)
     }
 }
 
+void MultiDimFit::doInverseSamplePoints(RooWorkspace *w, RooAbsReal &nll, RooStats::ModelConfig *mc_s)
+{
+    if (inputFile_ == "") throw std::logic_error("No input file specified");
+    std::vector<std::vector<float>> rnd_vals;
+    unsigned int n = poi_.size();
+    for(unsigned int i = 0; i < n+nOtherFloatingPoi_; i++)
+      rnd_vals.push_back({});
+    // Random values for each POI
+    for (unsigned int i = 0; i < n; ++i) {
+      TString name = TString(poi_[i].c_str());
+      TProfile* h_pdf;
+      // Expects format: `inputFile_.<POI>.MultiDimFit.root`
+      auto loadLimitFile = TFile::Open(TString::Format("%s.%s.MultiDimFit.root", inputFile_.c_str(), name.Data()));
+      if (loadLimitFile == nullptr) throw std::logic_error("Could not read input file");
+      auto inputLimit = (TTree*)loadLimitFile->Get("limit");
+      if (inputLimit == nullptr) throw std::logic_error("Could not read 'limit' tree");
+      // Initial histogram to get good ranges
+      inputLimit->Draw(TString::Format("-2*deltaNLL:%s>>h", name.Data()), "quantileExpected>-1 && deltaNLL!=0", "prof goff");
+      auto h = (TProfile*)loadLimitFile->Get("h");
+      h_pdf = new TProfile("h_pdf", "h_pdf", 100, h->GetXaxis()->GetXmin(), h->GetXaxis()->GetXmax());
+      // Plot with good range, flip NLL (becomes log-likelihood), subtract off minimum
+      inputLimit->Draw(TString::Format("-2*deltaNLL+%f:%s>>+h_pdf", inputLimit->GetMaximum("deltaNLL")*2, name.Data()), "quantileExpected>-1", "prof goff");
+      // Normalize
+      h_pdf->Scale(1./h_pdf->Integral());
+      // `points_` random values
+      for(unsigned int r = 0; r < points_; r++)
+        rnd_vals[i].push_back(h_pdf->GetRandom()); // Seed was updated in `bin/combine.cpp`
+
+      // Cleanup
+      delete h;
+      delete h_pdf;
+      delete inputLimit;
+      loadLimitFile->Close();
+      delete loadLimitFile;
+    }
+
+
+    // Rest is modeled after `doRandomPoints()` (could refactor)
+    double nll0 = nll.getVal();
+    if (startFromPreFit_) w->loadSnapshot("clean");
+    for (unsigned int i = 0, n = poi_.size(); i < n; ++i) {
+        poiVars_[i]->setConstant(true);
+    }
+
+    CascadeMinimizer minim(nll, CascadeMinimizer::Constrained);
+    if (!autoBoundsPOIs_.empty()) minim.setAutoBounds(&autoBoundsPOISet_); 
+    if (!autoMaxPOIs_.empty()) minim.setAutoMax(&autoMaxPOISet_); 
+    //minim.setStrategy(minimizerStrategy_);
+    for (unsigned int j = 0; j < points_; ++j) {
+        for (unsigned int i = 0; i < n; ++i) {
+            poiVars_[i]->setVal(rnd_vals[i][j]); // Use random values from above instead of `randomize()`
+            poiVals_[i] = poiVars_[i]->getVal(); 
+        }
+        // now we minimize
+        {   
+            CloseCoutSentry sentry(verbose < 3);    
+            bool ok = minim.minimize(verbose-1);
+            if (ok) {
+                double qN = 2*(nll.getVal() - nll0);
+                double prob = ROOT::Math::chisquared_cdf_c(qN, n+nOtherFloatingPoi_);
+                deltaNLL_ = nll.getVal() - nll0;
+		for(unsigned int j=0; j<specifiedNuis_.size(); j++){
+			specifiedVals_[j]=specifiedVars_[j]->getVal();
+		}
+		for(unsigned int j=0; j<specifiedFuncNames_.size(); j++){
+			specifiedFuncVals_[j]=specifiedFunc_[j]->getVal();
+		}
+		for(unsigned int j=0; j<specifiedCatNames_.size(); j++){
+			specifiedCatVals_[j]=specifiedCat_[j]->getIndex();
+		}
+                Combine::commitPoint(true, /*quantile=*/prob);
+            }
+        } 
+    }
+}
 void MultiDimFit::doRandomPoints(RooWorkspace *w, RooAbsReal &nll) 
 {
     double nll0 = nll.getVal();
@@ -978,6 +1061,7 @@ void MultiDimFit::doRandomPoints(RooWorkspace *w, RooAbsReal &nll)
             if (ok) {
                 double qN = 2*(nll.getVal() - nll0);
                 double prob = ROOT::Math::chisquared_cdf_c(qN, n+nOtherFloatingPoi_);
+                deltaNLL_ = nll.getVal() - nll0;
 		for(unsigned int j=0; j<specifiedNuis_.size(); j++){
 			specifiedVals_[j]=specifiedVars_[j]->getVal();
 		}

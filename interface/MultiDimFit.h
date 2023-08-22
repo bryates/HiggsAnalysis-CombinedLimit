@@ -24,7 +24,7 @@ public:
 protected:
   virtual bool runSpecific(RooWorkspace *w, RooStats::ModelConfig *mc_s, RooStats::ModelConfig *mc_b, RooAbsData &data, double &limit, double &limitErr, const double *hint);
 
-  enum Algo { None, Singles, Cross, Grid, RandomPoints, Contour2D, Stitch2D, FixedPoint, Impact };
+  enum Algo { None, Singles, Cross, Grid, RandomPoints, Contour2D, Stitch2D, FixedPoint, Impact, InverseSamplePoints };
   static Algo algo_;
 
   enum GridType { G1x1, G3x3 };
@@ -87,6 +87,7 @@ protected:
   // variables
   void doSingles(RooFitResult &res) ;
   void doGrid(RooWorkspace *w, RooAbsReal &nll) ;
+  void doInverseSamplePoints(RooWorkspace *w, RooAbsReal &nll, RooStats::ModelConfig *mc_s);
   void doRandomPoints(RooWorkspace *w, RooAbsReal &nll) ;
   void doFixedPoint(RooWorkspace *w, RooAbsReal &nll) ;
   void doContour2D(RooWorkspace *w, RooAbsReal &nll) ;

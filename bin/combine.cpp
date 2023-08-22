@@ -275,6 +275,7 @@ int main(int argc, char **argv) {
   mass = iMass;
   iSeed = seed;
   iChannel = 0;
+  gRandom->SetSeed(seed); // Update ROOT seed used in `GetRandom()`
 
   // if you have libraries, it's time to load them now
   for (vector<string>::const_iterator lib = librariesToLoad.begin(), endlib = librariesToLoad.end(); lib != endlib; ++lib) {
