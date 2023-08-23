@@ -1052,8 +1052,7 @@ void MultiDimFit::doInverseSamplePoints(RooWorkspace *w, RooAbsReal &nll, RooSta
             Combine::commitPoint(true, /*quantile=*/prob);
         }
       }
-    } else
-      throw std::logic_error("Method only implemented for 1 POI");
+    }
 }
 void MultiDimFit::doRandomPoints(RooWorkspace *w, RooAbsReal &nll) 
 {
