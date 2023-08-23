@@ -963,78 +963,97 @@ void MultiDimFit::doGrid(RooWorkspace *w, RooAbsReal &nll)
 
 void MultiDimFit::doInverseSamplePoints(RooWorkspace *w, RooAbsReal &nll, RooStats::ModelConfig *mc_s)
 {
-    if (inputFile_ == "") throw std::logic_error("No input file specified");
-    std::vector<std::vector<float>> rnd_vals;
+    std::vector<std::vector<double>> rnd_vals;
     unsigned int n = poi_.size();
-    for(unsigned int i = 0; i < n+nOtherFloatingPoi_; i++)
-      rnd_vals.push_back({});
-    // Random values for each POI
-    for (unsigned int i = 0; i < n; ++i) {
-      TString name = TString(poi_[i].c_str());
-      TProfile* h_pdf;
-      // Expects format: `inputFile_.<POI>.MultiDimFit.root`
+    RooLinkedListIter iterP = mc_s->GetParametersOfInterest()->iterator();
+    int i = 0;
+    for (RooAbsArg *a = (RooAbsArg*) iterP.Next(); a != 0; a = (RooAbsArg*) iterP.Next()) {
+      RooRealVar *rrv = dynamic_cast<RooRealVar *>(a);
+      TString name = rrv->GetName();//TString(poi_[i].c_str());
       auto loadLimitFile = TFile::Open(TString::Format("%s.%s.MultiDimFit.root", inputFile_.c_str(), name.Data()));
       if (loadLimitFile == nullptr) throw std::logic_error("Could not read input file");
       auto inputLimit = (TTree*)loadLimitFile->Get("limit");
       if (inputLimit == nullptr) throw std::logic_error("Could not read 'limit' tree");
       // Initial histogram to get good ranges
-      inputLimit->Draw(TString::Format("-2*deltaNLL:%s>>h", name.Data()), "quantileExpected>-1 && deltaNLL!=0", "prof goff");
-      auto h = (TProfile*)loadLimitFile->Get("h");
-      h_pdf = new TProfile("h_pdf", "h_pdf", 100, h->GetXaxis()->GetXmin(), h->GetXaxis()->GetXmax());
-      // Plot with good range, flip NLL (becomes log-likelihood), subtract off minimum
-      inputLimit->Draw(TString::Format("-2*deltaNLL+%f:%s>>+h_pdf", inputLimit->GetMaximum("deltaNLL")*2, name.Data()), "quantileExpected>-1", "prof goff");
-      // Normalize
-      h_pdf->Scale(1./h_pdf->Integral());
-      // `points_` random values
+      inputLimit->Draw(TString::Format("-2*deltaNLL+%f:%s>>h", inputLimit->GetMaximum("deltaNLL")*2, name.Data()), "quantileExpected>-1 && deltaNLL!=0", "prof goff");
+      auto h_pdf = (TProfile*)loadLimitFile->Get("h");
+      for(int i = 1; i <= h_pdf->GetNbinsX(); i++)
+        if(h_pdf->GetBinContent(i) < 0) h_pdf->SetBinContent(i, 0);
+      std::vector<double> v;
       for(unsigned int r = 0; r < points_; r++)
-        rnd_vals[i].push_back(h_pdf->GetRandom()); // Seed was updated in `bin/combine.cpp`
+        v.push_back(h_pdf->GetRandom()); // Seed was updated in `bin/combine.cpp`
+      rnd_vals.push_back(v);
 
       // Cleanup
-      delete h;
       delete h_pdf;
       delete inputLimit;
       loadLimitFile->Close();
       delete loadLimitFile;
+
+      i++;
     }
 
 
-    // Rest is modeled after `doRandomPoints()` (could refactor)
+    // Rest is modeled after `doGrid()`
     double nll0 = nll.getVal();
-    if (startFromPreFit_) w->loadSnapshot("clean");
-    for (unsigned int i = 0, n = poi_.size(); i < n; ++i) {
-        poiVars_[i]->setConstant(true);
+
+    if (setParametersForGrid_ != "") {
+       RooArgSet allParams(w->allVars());
+       allParams.add(w->allCats());
+       utils::setModelParameters( setParametersForGrid_, allParams);
     }
+
+    if (startFromPreFit_) w->loadSnapshot("clean");
 
     CascadeMinimizer minim(nll, CascadeMinimizer::Constrained);
     if (!autoBoundsPOIs_.empty()) minim.setAutoBounds(&autoBoundsPOISet_); 
     if (!autoMaxPOIs_.empty()) minim.setAutoMax(&autoMaxPOISet_); 
     //minim.setStrategy(minimizerStrategy_);
-    for (unsigned int j = 0; j < points_; ++j) {
-        for (unsigned int i = 0; i < n; ++i) {
-            poiVars_[i]->setVal(rnd_vals[i][j]); // Use random values from above instead of `randomize()`
-            poiVals_[i] = poiVars_[i]->getVal(); 
+    std::auto_ptr<RooArgSet> params(nll.getParameters((const RooArgSet *)0));
+    RooArgSet snap; params->snapshot(snap);
+    //snap.Print("V");
+
+    if (n >= 1) {
+      for (unsigned int i = 0; i < points_; ++i) {
+        *params = snap;
+        for (unsigned int r = 0; r < n; ++r) {
+          poiVals_[r] = rnd_vals[r][i];
+          poiVars_[r]->setVal(rnd_vals[r][i]);
+          poiVars_[r]->setConstant(true);
         }
         // now we minimize
-        {   
-            CloseCoutSentry sentry(verbose < 3);    
-            bool ok = minim.minimize(verbose-1);
-            if (ok) {
-                double qN = 2*(nll.getVal() - nll0);
-                double prob = ROOT::Math::chisquared_cdf_c(qN, n+nOtherFloatingPoi_);
-                deltaNLL_ = nll.getVal() - nll0;
-		for(unsigned int j=0; j<specifiedNuis_.size(); j++){
-			specifiedVals_[j]=specifiedVars_[j]->getVal();
-		}
-		for(unsigned int j=0; j<specifiedFuncNames_.size(); j++){
-			specifiedFuncVals_[j]=specifiedFunc_[j]->getVal();
-		}
-		for(unsigned int j=0; j<specifiedCatNames_.size(); j++){
-			specifiedCatVals_[j]=specifiedCat_[j]->getIndex();
-		}
-                Combine::commitPoint(true, /*quantile=*/prob);
+        nll.clearEvalErrorLog();
+        if (nll.numEvalErrors() > 0) {
+            deltaNLL_ = 9990;
+            for(unsigned int j=0; j<specifiedNuis_.size(); j++){
+            	specifiedVals_[j]=specifiedVars_[j]->getVal();
             }
-        } 
-    }
+            for(unsigned int j=0; j<specifiedFuncNames_.size(); j++){
+            	specifiedFuncVals_[j]=specifiedFunc_[j]->getVal();
+            }
+            Combine::commitPoint(true, /*quantile=*/0);
+        }
+        bool ok = fastScan_ || (hasMaxDeltaNLLForProf_ && (nll.getVal() - nll0) > maxDeltaNLLForProf_) || utils::countFloating(*params)==0 ? 
+                    true : 
+                    minim.minimize(verbose-1);
+        if (ok) {
+            deltaNLL_ = nll.getVal() - nll0;
+            double qN = 2*(deltaNLL_);
+            double prob = ROOT::Math::chisquared_cdf_c(qN, n+nOtherFloatingPoi_);
+            for(unsigned int j=0; j<specifiedNuis_.size(); j++){
+            	specifiedVals_[j]=specifiedVars_[j]->getVal();
+            }
+            for(unsigned int j=0; j<specifiedFuncNames_.size(); j++){
+            	specifiedFuncVals_[j]=specifiedFunc_[j]->getVal();
+            }
+            for(unsigned int j=0; j<specifiedCatNames_.size(); j++){
+            	specifiedCatVals_[j]=specifiedCat_[j]->getIndex();
+            }
+            Combine::commitPoint(true, /*quantile=*/prob);
+        }
+      }
+    } else
+      throw std::logic_error("Method only implemented for 1 POI");
 }
 void MultiDimFit::doRandomPoints(RooWorkspace *w, RooAbsReal &nll) 
 {
